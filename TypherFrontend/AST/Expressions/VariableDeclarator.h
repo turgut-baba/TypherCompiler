@@ -75,6 +75,8 @@ namespace AST {
 		{
 			return array_indices_;
 		}
+
+		bool IsDefinition();
 		
 		void Accept(NodeVisitor* v) override { v->Visit(this); }
 	private:

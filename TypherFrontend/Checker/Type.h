@@ -1,3 +1,6 @@
+#ifndef TYPE_H
+#define TYPE_H
+
 #include "ASTNode.h"
 
 namespace Checker {
@@ -7,13 +10,51 @@ namespace Checker {
         USER_DEFINED,
     };
 
-    enum Flags {
+    enum class TypeFlags {
         CONST = 1 << 0,
         VOLATILE = 1 << 1,
         POINTER = 1 << 2,
         ARRAY = 1 << 3,
         FUNCTION = 1 << 4
     };
+
+    inline TypeFlags& operator|=(TypeFlags& a, TypeFlags b)
+    {
+        return a = static_cast<TypeFlags>(
+            static_cast<std::underlying_type_t<TypeFlags>>(a) | 
+            static_cast<std::underlying_type_t<TypeFlags>>(b)
+        );
+    }
+
+    inline TypeFlags& operator&=(TypeFlags& a, TypeFlags b)
+    {
+        return a = static_cast<TypeFlags>(
+            static_cast<std::underlying_type_t<TypeFlags>>(a) & 
+            static_cast<std::underlying_type_t<TypeFlags>>(b)
+        );
+    }
+
+    inline TypeFlags operator~(TypeFlags a)
+    {
+        return static_cast<TypeFlags>(~static_cast<int>(a));
+    }
+
+    inline TypeFlags operator&(TypeFlags a, TypeFlags b)
+    {
+        return static_cast<TypeFlags>(
+            static_cast<int>(a) & static_cast<int>(b)
+        );
+    }
+
+    inline bool operator!=(TypeFlags a, int b)
+    {
+        return static_cast<int>(a) != static_cast<int>(b);
+    }
+
+    inline bool operator==(TypeFlags a, int b)
+    {
+        return static_cast<int>(a) == static_cast<int>(b);
+    }
     
     class Type {
     public:
@@ -35,26 +76,28 @@ namespace Checker {
             return kind_ == other.kind_ && size_in_bytes == other.size_in_bytes;
         }
 
-        int Flags() const { return flags_; }
+        TypeFlags GetFlags() const { return flags_; }
 
-        void SetFlag(Flags flag) { flags_ |= flag; }
-        void ClearFlag(Flags flag) { flags_ &= ~flag; }
-        bool HasFlag(Flags flag) const { return (flags_ & flag) != 0; }
+        void SetFlag(TypeFlags flag) { flags_ |= flag; }
+        void ClearFlag(TypeFlags flag) { flags_ &= ~flag; }
+        bool HasFlag(TypeFlags flag) const { return (flags_ & flag) != 0; }
 
-        static std::shared_ptr<Type> MakeVoid() { return std::make_shared<Type>(TypeKind::VOID, 0); }
-        static std::shared_ptr<Type> MakeByte() { return std::make_shared<Type>(TypeKind::BYTE, 1); }
-        static std::shared_ptr<Type> MakeChar() { return std::make_shared<Type>(TypeKind::CHAR, 1); }
-        static std::shared_ptr<Type> MakeShort() { return std::make_shared<Type>(TypeKind::SHORT, 2); }
-        static std::shared_ptr<Type> MakeInt() { return std::make_shared<Type>(TypeKind::INT, 4); }
-        static std::shared_ptr<Type> MakeLong() { return std::make_shared<Type>(TypeKind::LONG, 8); }
-        static std::shared_ptr<Type> MakeFloat() { return std::make_shared<Type>(TypeKind::FLOAT, 4); }
-        static std::shared_ptr<Type> MakeDouble() { return std::make_shared<Type>(TypeKind::DOUBLE, 8); }
+        static std::shared_ptr<Type> MakeVoid() { return std::make_shared<Type>(AstBuiltinTypes::VOID); }
+        static std::shared_ptr<Type> MakeByte() { return std::make_shared<Type>(AstBuiltinTypes::BOOL); }
+        static std::shared_ptr<Type> MakeChar() { return std::make_shared<Type>(AstBuiltinTypes::CHAR); }
+        static std::shared_ptr<Type> MakeShort() { return std::make_shared<Type>(AstBuiltinTypes::SHORT); }
+        static std::shared_ptr<Type> MakeInt() { return std::make_shared<Type>(AstBuiltinTypes::INT); }
+        static std::shared_ptr<Type> MakeLong() { return std::make_shared<Type>(AstBuiltinTypes::LONG); }
+        static std::shared_ptr<Type> MakeFloat() { return std::make_shared<Type>(AstBuiltinTypes::FLOAT); }
+        static std::shared_ptr<Type> MakeDouble() { return std::make_shared<Type>(AstBuiltinTypes::DOUBLE); }
     private:
         int size_in_bytes;
         std::string name_ = "";  // For USER_DEFINED
         AstBuiltinTypes builtin_ = AstBuiltinTypes::NONE; // For BUILT_IN
-        SlabArena<std::shared_ptr<Type>> param_types;  // For FUNCTION
+        SlabVector<std::shared_ptr<Type>> param_types;  // For FUNCTION
         TypeKind kind_;
-        int flags_;
+        TypeFlags flags_;
     };
 }
+
+#endif

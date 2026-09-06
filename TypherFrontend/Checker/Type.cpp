@@ -46,7 +46,7 @@ namespace Checker {
     Type::Type(std::string name, int size)
     {
         name_ = name;
-        size_ = size;
+        size_in_bytes = size;
         kind_ = USER_DEFINED;
     }
 }

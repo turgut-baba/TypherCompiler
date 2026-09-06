@@ -1,5 +1,5 @@
 #include "Expressions/VariableDeclarator.h"
-
+#include "Expressions/Operator.h"
 namespace AST{
 	VariableDeclarator::VariableDeclarator(Expression* expr, 
 										   Identifier* ident, 
@@ -18,6 +18,17 @@ namespace AST{
 		if (ident != nullptr) {
 			ident->SetParent(this);
 		}
+	}
+
+	bool VariableDeclarator::IsDefinition()
+	{
+		if(expression->NodeType() == AstNodeType::OPERATOR) {
+			AST::Operator* op = static_cast<AST::Operator*>(expression);
+			if(op->OperatorType() == AST::OperatorKind::ASN) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 }

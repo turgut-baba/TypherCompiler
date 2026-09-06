@@ -1,15 +1,14 @@
-#ifndef TYPE_CHECKER_H
-#define TYPE_CHECKER_H
+#ifndef TYPE_RESOLVER_H
+#define TYPE_RESOLVER_H
 
 #include "SymbolTable.h"
-#include "Checker.h"
 
 namespace Checker {
 
-class TypeResolver: public Checker
+class TypeResolver
 {
 public:
-    TypeResolver();
+    TypeResolver() = default;
 
     void RegisterTypes(SymbolTable& symbol_table);
 

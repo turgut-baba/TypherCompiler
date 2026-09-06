@@ -2,35 +2,20 @@
 #define CHECKER_H
 
 #include "Parser.h"
-//#include "SemanticAnalyzer.h"
+#include "SemanticAnalysis/SemanticAnalyzer.h"
+#include "SemanticAnalysis/TypeResolver.h"
 #include "Memory/MemAlloc.h"
 #include "Memory/BumpPtrAlloc.h"
 
-namespace checker {
+#include "CheckerState.h"
+
+namespace Checker {
 
 	class Type;
 
 	class Checker {
 	public:
 		explicit Checker(DiagnosticEngine &diags, MemoryAllocator *allocator);
-
-        virtual void Check(Function* node) = 0;
-        virtual void Check(Statement* node) = 0;
-        virtual void Check(VariableDeclarator* node) = 0;
-        virtual void Check(VariableDeclaration* node) = 0;
-        virtual void Check(Expression* node) = 0;
-        virtual void Check(Identifier* node) = 0;
-        virtual void Check(IntegerLiteral* node) = 0;
-        virtual void Check(StringLiteral* node) = 0;
-        virtual void Check(Operator* node) = 0;
-        virtual void Check(CallExpression* node) = 0;
-        virtual void Check(MemoryOperation* node) = 0;
-        virtual void Check(ReturnStatement* node) = 0;
-        virtual void Check(IfStatement* node) = 0;
-        virtual void Check(ExpressionStatement* node) = 0;
-        virtual void Check(WhileStatement* node) = 0;
-        virtual void Check(ForStatement* node) = 0;
-        virtual void Check(InitializerList* node) = 0;
 
 		void StartChecker(SlabVector<AST::Statement*>& AST_tree);
 
@@ -50,9 +35,9 @@ namespace checker {
 			return state_->analyzer_.get();
 		}
 
-		SymbolTable* SymbolTable()
+		SymbolTable* Table()
 		{
-			return state_->symbol_table.get();
+			return state_->symbol_table_.get();
 		}
 
 		void check_module(SlabVector<AST::Statement*> ASTTree);

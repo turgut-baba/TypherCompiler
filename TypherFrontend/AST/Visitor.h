@@ -1,6 +1,25 @@
 #ifndef VISITOR_H
 #define VISITOR_H
 
+
+#define VISITOR void Visit(AST::Function* node) override; \
+    void Visit(AST::Statement* node) override; \
+    void Visit(AST::VariableDeclarator* node) override; \
+    void Visit(AST::Expression* node) override; \
+    void Visit(AST::Identifier* node) override; \
+    void Visit(AST::IntegerLiteral* node) override; \
+    void Visit(AST::StringLiteral* node) override; \
+    void Visit(AST::VariableDeclaration* node) override; \
+    void Visit(AST::Operator* node) override; \
+    void Visit(AST::CallExpression* node) override; \
+    void Visit(AST::MemoryOperation* node) override; \
+    void Visit(AST::ReturnStatement* node) override; \
+    void Visit(AST::IfStatement* node) override; \
+    void Visit(AST::ExpressionStatement* node) override; \
+    void Visit(AST::WhileStatement* node) override; \
+    void Visit(AST::ForStatement* node) override; \
+    void Visit(AST::InitializerList* node) override; \
+
 namespace AST {
     class Function;
     class Statement;

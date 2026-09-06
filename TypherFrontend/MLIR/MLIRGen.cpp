@@ -1,87 +1,18 @@
-#include "MLIRGen.h" // TODO: change this to checker/analyzer.
+#include "MLIRGen.h"
+#include "MLIRBuilder.h"
+#include "MLIREmitter.h"
 #include "MLIRHelpers.h"
-#include "Helpers.h"
 
 namespace MLIR {
 	using llvm::dyn_cast;
 	using llvm::SmallVector;
 
-	Generator::Generator()
+	Generator::Generator(MemoryAllocator *allocator)
+		:allocator_(allocator)
 	{
-		mlir::func::registerAllExtensions(registry);
-		mlir::LLVM::registerInlinerInterface(registry);
-
-		registry.insert<mlir::arith::ArithDialect>();
-
-		context = std::make_shared<mlir::MLIRContext>(registry);
-
-		context->loadDialect<mlir::arith::ArithDialect>();
-	}
-
-	mlir::Value Generator::LvalueToRvalue(mlir::Value addr, mlir::Location location)
-	{
-		mlir::Type addrType = addr.getType();
-		
-		if (auto memrefType = mlir::dyn_cast<mlir::MemRefType>(addrType)) {
-			mlir::Type elementType = memrefType.getElementType();
-			return mlir::typher::LoadOp::create(*builder, location, elementType, addr);
-		} 
-
-		if (auto ptrType = mlir::dyn_cast<mlir::typher::PointerType>(addrType)) {
-        	mlir::Type elementType = ptrType.getElementType();
-        	return builder->create<mlir::typher::LoadOp>(location, elementType, addr);
-    	}
-
-		if(auto arrayType = mlir::dyn_cast<mlir::typher::ArrayType>(addrType)) {
-			// TODO: This doesn't work because the array variables are not allocated as ArrayType.
-			mlir::Type elementType = arrayType.getElementType();
-			return builder->create<mlir::typher::LoadOp>(location, elementType, addr);
-		}
-
-		return addr;
-	}
-
-	mlir::Value Generator::GenArrayAccess(AST::MemoryOperation* node, mlir::Type array_type)
-	{
-		llvm::SmallVector<mlir::Value, 4> indexValues;
-		mlir::StringAttr persistentName = builder->getStringAttr(
-			((AST::Identifier*)node->GetExpression())->Value() // TODO: Find a better approach to this.
-		);
-		
-		mlir::Value address = symbolTable.lookup(persistentName.getValue());
-		// Check if base address points to an ArrayType (!typher.ptr<!typher.array<...>>)
-		auto ptrType = mlir::dyn_cast<mlir::typher::PointerType>(address.getType());
-		if (ptrType && mlir::isa<mlir::typher::ArrayType>(ptrType.getElementType())) {
-			// Prepend index 0 to dereference the array pointer
-			mlir::Value zeroIdx = builder->create<mlir::arith::ConstantIndexOp>(loc(node->Loc()), 0);
-			indexValues.push_back(zeroIdx);
-		}
-
-		for (AST::Expression* indexExpr : node->ArrayIndices()) {
-			indexExpr->Accept(this);
-			mlir::Value indexVal = retValue;
-			
-			if (!indexVal.getType().isIndex()) {
-				indexVal = builder->create<mlir::arith::IndexCastOp>(
-					loc(indexExpr->Loc()), 
-					builder->getIndexType(), 
-					indexVal
-				);
-			}
-			indexValues.push_back(indexVal);
-		}
-
-		auto resultPtrType = mlir::typher::PointerType::get(builder->getContext(), array_type);
-
-		// address is guaranteed to be !typher.ptr<!typher.array<3 x i32>>
-		address = builder->create<mlir::typher::AccessOp>(
-			loc(node->Loc()),
-			resultPtrType, // !typher.ptr<i32>
-			address,       // !typher.ptr<!typher.array<3 x i32>>
-			indexValues    // [%c0, %c1]
-		);
-
-		return address;
+		// TODO: fix this
+		builder_ = Allocator()->Allocate<Builder>(this);
+		emit_ = Allocator()->Allocate<Emitter>();
 	}
 
 	Generator::~Generator()
@@ -89,44 +20,11 @@ namespace MLIR {
 
 	}
 
-	void Generator::Generate(SlabVector<AST::Statement*>& ASTTree)
-	{
-        context->getOrLoadDialect<mlir::typher::TypherDialect>();
-
-		builder = std::make_shared<mlir::OpBuilder>(context.get());
-		
-		theModule = mlir::ModuleOp::create(builder->getUnknownLoc());
-
-		// TODO: Add global (modular) context.
-    	
-		//llvm::ScopedHashTableScope<llvm::StringRef, mlir::Value> varScope(symbolTable);
-
-		for (AST::ASTNode* node : ASTTree)
-      		node->Accept(this);
-
-		if (failed(mlir::verify(theModule))) {
-			theModule.emitError("module verification error");
-			return;
-		}
-
-        theModule->dump();
-	}
-
-	void Generator::GenBody(AST::Body* body, mlir::Location& location) 
-	{
-		llvm::ScopedHashTableScope<llvm::StringRef, mlir::Value> varScope(symbolTable);
-		
-		for (AST::ASTNode* child: body->Statements()) {
-			child->Accept(this);
-			// if (SOME ERROR HANDLING) { function.erase(); return; }
-    	}
-		
-		if (builder->getBlock()->empty() || 
-			!builder->getBlock()->back().hasTrait<mlir::OpTrait::IsTerminator>()) {
-			mlir::typher::YieldOp::create(*builder, location);
-		}
-	}
-	
+	void Generator::BuildModule(SlabVector<AST::Statement*>& AST_tree)
+    {
+        builder_->Build(AST_tree);
+        emit_->Emit(builder_->Context(), builder_->Module());
+    }
 
 	void Generator::Visit(AST::ExpressionStatement* node)
 	{
@@ -135,14 +33,14 @@ namespace MLIR {
 
 	void Generator::Visit(AST::Function* node)
 	{
-    	llvm::ScopedHashTableScope<llvm::StringRef, mlir::Value> varScope(symbolTable);
+    	llvm::ScopedHashTableScope<llvm::StringRef, mlir::Value> varScope(builder_->symbolTable);
 
-		builder->setInsertionPointToEnd(theModule.getBody());
+		builder_->op->setInsertionPointToEnd(builder_->Module().getBody());
 
-		auto location = loc(node->Loc());
+		auto location = builder_->loc(node->Loc());
 		
-		mlir::Type returnType = ASTTypeToMlirType(node->ReturnType(), builder);
-		ApplyTypeModifiers(node->Declarator(), returnType, builder);
+		mlir::Type returnType = ASTTypeToMlirType(node->ReturnType(), builder_->op);
+		ApplyTypeModifiers(node->Declarator(), returnType, builder_->op);
 
 		auto funcArgs = node->Params();
 
@@ -150,14 +48,14 @@ namespace MLIR {
 
 		for (size_t i = 0; i < funcArgs.size(); i++) 
 		{
-			auto arg_type = ASTTypeToMlirType(funcArgs[i].Type(), builder);
-			ApplyTypeModifiers(funcArgs[i].AsDeclarator(), arg_type, builder);
+			auto arg_type = ASTTypeToMlirType(funcArgs[i].Type(), builder_->op);
+			ApplyTypeModifiers(funcArgs[i].AsDeclarator(), arg_type, builder_->op);
 			
 			argTypes.push_back(arg_type);
 		}
 
-		mlir::FunctionType funcType = builder->getFunctionType(argTypes, returnType);
-		mlir::typher::FuncOp function = mlir::typher::FuncOp::create(*builder, location, node->Name(),
+		mlir::FunctionType funcType = builder_->op->getFunctionType(argTypes, returnType);
+		mlir::typher::FuncOp function = mlir::typher::FuncOp::create(*builder_->op, location, node->Name(),
 										funcType);
 
 		mlir::Type expectedType = returnType;
@@ -165,10 +63,10 @@ namespace MLIR {
 		mlir::Block &entryBlock = function.front();
 		auto entryArgs = entryBlock.getArguments();
 
-		builder->setInsertionPointToStart(&entryBlock);
+		builder_->op->setInsertionPointToStart(&entryBlock);
 
 		for (size_t i = 0; i < funcArgs.size(); ++i) {
-			mlir::StringAttr paramName = builder->getStringAttr(funcArgs[i].Name());
+			mlir::StringAttr paramName = builder_->op->getStringAttr(funcArgs[i].Name());
 			mlir::Value mlirArg = entryArgs[i]; // The incoming Rvalue argument
 			
 			// 1. Get the type of the argument
@@ -177,17 +75,17 @@ namespace MLIR {
 			// 2. Allocate a local stack slot for the parameter (Lvalue)
 			// Note: If using MemRefType for stack slots, build memref<argType>
 			// auto memrefType = mlir::MemRefType::get({}, argType);
-			auto memrefType = mlir::typher::PointerType::get(builder->getContext(), argType);
-			mlir::Value paramAlloc = builder->create<mlir::typher::AllocaOp>(location, memrefType);
+			auto memrefType = mlir::typher::PointerType::get(builder_->op->getContext(), argType);
+			mlir::Value paramAlloc = builder_->op->create<mlir::typher::AllocaOp>(location, memrefType);
 
 			// 3. Store the incoming argument value into the stack slot
-			builder->create<mlir::typher::AssignOp>(location, mlirArg, paramAlloc);
+			builder_->op->create<mlir::typher::AssignOp>(location, mlirArg, paramAlloc);
 
 			// 4. Register the STACK SLOT (Lvalue) in the symbol table, NOT the raw argument
-			symbolTable.insert(paramName.getValue(), paramAlloc);
+			builder_->symbolTable.insert(paramName.getValue(), paramAlloc);
 		}
 
-		GenBody(node->GetBody(), location);
+		builder_->GenBody(node->GetBody(), location);
 
  		mlir::typher::ReturnOp returnOp;
 		if (!entryBlock.empty()) {
@@ -196,9 +94,9 @@ namespace MLIR {
 
 		if (!returnOp) {
 			// TODO: this place causes a seg fault.
-			mlir::typher::ReturnOp::create(*builder, location);
+			mlir::typher::ReturnOp::create(*builder_->op, location);
 		} else if(returnOp.hasOperand()){
-			function.setType(builder->getFunctionType(
+			function.setType(builder_->op->getFunctionType(
           		function.getFunctionType().getInputs(), returnType));
 		}
 
@@ -212,31 +110,31 @@ namespace MLIR {
 
 	void Generator::Visit(AST::VariableDeclarator* node) 
 	{
-		auto location = loc(node->Loc());
+		auto location = builder_->loc(node->Loc());
 
-		mlir::Type varType = ASTTypeToMlirType(((AST::VariableDeclaration*)node->Parent())->Type(), builder);
+		mlir::Type varType = ASTTypeToMlirType(((AST::VariableDeclaration*)node->Parent())->Type(), builder_->op);
 
-		ApplyTypeModifiers(node, varType, builder);
+		ApplyTypeModifiers(node, varType, builder_->op);
 		
-		auto memrefType = mlir::typher::PointerType::get(builder->getContext(), varType);
+		auto memrefType = mlir::typher::PointerType::get(builder_->op->getContext(), varType);
 		//auto memrefType = mlir::MemRefType::get({}, varType);
 
-		mlir::Value address = mlir::typher::AllocaOp::create(*builder, 
+		mlir::Value address = mlir::typher::AllocaOp::create(*builder_->op, 
 			location, memrefType);
 
 		if (node->Expr()) {
-			retValue = address;
+			builder_->retValue = address;
 			node->Expr()->Accept(this);
-			mlir::Value initialValue = LvalueToRvalue(retValue, location);
+			mlir::Value initialValue = builder_->LvalueToRvalue(builder_->retValue, location);
 			mlir::Type addrType = initialValue.getType();
 			
-			mlir::typher::AssignOp::create(*builder, location, initialValue, address);
+			mlir::typher::AssignOp::create(*builder_->op, location, initialValue, address);
 		}
 		
-		mlir::StringAttr varName = builder->getStringAttr(node->Name());
-		symbolTable.insert(varName.getValue(), address);
+		mlir::StringAttr varName = builder_->op->getStringAttr(node->Name());
+		builder_->symbolTable.insert(varName.getValue(), address);
 
-		retValue = address;
+		builder_->retValue = address;
 	}
 	
 	void Generator::Visit(AST::VariableDeclaration* node) 
@@ -245,7 +143,7 @@ namespace MLIR {
 		for(int i = 0; i < decl_list.size(); i++)
 		{
 			decl_list[i]->Accept(this);
-			if (failed(declare(decl_list[i]->Name(), retValue)))
+			if (failed(builder_->declare(decl_list[i]->Name(), builder_->retValue)))
 				return;
 		}
 	}
@@ -258,19 +156,19 @@ namespace MLIR {
 	void Generator::Visit(AST::CallExpression* node) 
 	{
 		std::string callee = node->Callee();
-		auto location = loc(node->Loc());
+		auto location = builder_->loc(node->Loc());
 		// Codegen the operands first.
 		SmallVector<mlir::Value, 4> operands;
 		for (auto &expr : node->Args()) {
 			expr->Accept(this);
-			operands.push_back(retValue);
+			operands.push_back(builder_->retValue);
 		}
 
-		mlir::Type varType = builder->getI32Type();//ASTTypeToMlirType(node->Type(), builder);
+		mlir::Type varType = builder_->op->getI32Type();//ASTTypeToMlirType(node->Type(), builder_->op);
 
 		// TODO: do this better.
-		retValue = (mlir::Value)mlir::typher::GenericCallOp::create(
-				*builder, 
+		builder_->retValue = (mlir::Value)mlir::typher::GenericCallOp::create(
+				*builder_->op, 
 				location, 
 				varType, // Added parameter
 				callee, 
@@ -280,25 +178,25 @@ namespace MLIR {
 
 	void Generator::Visit(AST::ReturnStatement* node) 
 	{
-		auto location = loc(node->Loc());
+		auto location = builder_->loc(node->Loc());
 
 		// 'return' takes an optional expression, handle that case here.
 		if (node->Expr() != nullptr) {
 			node->Expr()->Accept(this);
 
-			mlir::Value addr = retValue; // This is the memref<i32> from symbolTable
-			addr = LvalueToRvalue(addr, location);
+			mlir::Value addr = builder_->retValue; // This is the memref<i32> from builder_->symbolTable
+			addr = builder_->LvalueToRvalue(addr, location);
 
-			mlir::typher::ReturnOp::create(*builder, location, addr);
+			mlir::typher::ReturnOp::create(*builder_->op, location, addr);
 		} else {
-			mlir::typher::ReturnOp::create(*builder, location,
-				retValue);
+			mlir::typher::ReturnOp::create(*builder_->op, location,
+				builder_->retValue);
 		}
 	}
 
 	void Generator::Visit(AST::InitializerList* node)
 	{
-		auto location = loc(node->Loc());
+		auto location = builder_->loc(node->Loc());
 
 		const auto &elements = node->GetElements();
 		size_t count = elements.size();
@@ -308,29 +206,29 @@ namespace MLIR {
 			return;
 		}
 
-		mlir::Type elemType = builder->getI32Type(); 
+		mlir::Type elemType = builder_->op->getI32Type(); 
 
-		mlir::Value tempAlloc = retValue;
+		mlir::Value tempAlloc = builder_->retValue;
 
 		// 4. Element pointer type for GEP: !typher.ptr<T>
 		auto elemPtrType = mlir::typher::PointerType::get(
-			builder->getContext(), elemType
+			builder_->op->getContext(), elemType
 		);
 
 		// Constant index 0 needed for outer pointer dereference
-		mlir::Value zeroIdx = builder->create<mlir::arith::ConstantIndexOp>(
+		mlir::Value zeroIdx = builder_->op->create<mlir::arith::ConstantIndexOp>(
 			location, 0
 		);
 
 		// 5. Unified Loop: Evaluate and store all elements [0..N-1]
 		for (size_t i = 0; i < count; ++i) {
-			// Evaluate element expression -> sets retValue
+			// Evaluate element expression -> sets builder_->retValue
 			elements[i]->Accept(this);
-			mlir::Value valToStore = retValue;
+			mlir::Value valToStore = builder_->retValue;
 
 			llvm::SmallVector<mlir::Value, 4> indexValues;
 
-			mlir::Value elemIdx = builder->create<mlir::arith::ConstantIndexOp>(
+			mlir::Value elemIdx = builder_->op->create<mlir::arith::ConstantIndexOp>(
 				location, i
 			);
 
@@ -339,7 +237,7 @@ namespace MLIR {
 
 			// ✅ FIX: Pass TWO indices {%c0, %i} so AccessOp dereferences 
 			// !typher.ptr<!typher.array<N x T>> to !typher.ptr<T>
-			mlir::Value elemPtr = builder->create<mlir::typher::AccessOp>(
+			mlir::Value elemPtr = builder_->op->create<mlir::typher::AccessOp>(
 				location, 
 				elemPtrType, 
 				tempAlloc, 
@@ -347,58 +245,58 @@ namespace MLIR {
 			);
 
 			// Store value into element address
-			builder->create<mlir::typher::StoreOp>(
+			builder_->op->create<mlir::typher::StoreOp>(
 				location, valToStore, elemPtr
 			);
 		}
 
 		// Return pointer to temporary array aggregate
-		retValue = tempAlloc;
+		builder_->retValue = tempAlloc;
 	}
 
 
 	void Generator::Visit(AST::MemoryOperation* node) 
 	{
 		//node->GetExpression()->Accept(this);
-		mlir::Value address = retValue;
+		mlir::Value address = builder_->retValue;
 		
 		for (int i = 0; i < node->AddressDepth(); i++) {
-			mlir::StringAttr persistentName = builder->getStringAttr(
+			mlir::StringAttr persistentName = builder_->op->getStringAttr(
 				((AST::Identifier*)node->GetExpression())->Value() // TODO: Find a better approach to this.
 			);
-			address = symbolTable.lookup(persistentName.getValue());
+			address = builder_->symbolTable.lookup(persistentName.getValue());
 			
 			if (!address) {
-				emitError(loc(node->Loc()), "Undefined variable target for address-of operator");
+				emitError(builder_->loc(node->Loc()), "Undefined variable target for address-of operator");
 			}
 		}
 
 		if (!node->ArrayIndices().empty()) 
 		{
-			mlir::Type mlirElemType = builder->getI32Type(); // TODO: change this.
+			mlir::Type mlirElemType = builder_->op->getI32Type(); // TODO: change this.
 
-			address = GenArrayAccess(node, mlirElemType);
+			address = builder_->GenArrayAccess(node, mlirElemType);
 
-			//address = LvalueToRvalue(address, loc(node->Loc()));
+			//address = builder_->LvalueToRvalue(address, builder_->loc(node->Loc()));
 		}
 
 		for (int i = 0; i < node->DeRefDepth(); i++) { 
 			std::cout << "Deref depth: " << i << std::endl;
-			address = LvalueToRvalue(address, loc(node->Loc()));
+			address = builder_->LvalueToRvalue(address, builder_->loc(node->Loc()));
 		}
 
-		retValue = address;
+		builder_->retValue = address;
 	}
 
 	void Generator::Visit(AST::Identifier* node) 
 	{
-		auto location = loc(node->Loc());
+		auto location = builder_->loc(node->Loc());
 
-		if (auto variable = symbolTable.lookup(node->Value()))
+		if (auto variable = builder_->symbolTable.lookup(node->Value()))
 		{
 			mlir::Type varType = variable.getType();
 
-			retValue = variable; 
+			builder_->retValue = variable; 
 			return;
 		}
 
@@ -410,19 +308,19 @@ namespace MLIR {
 	void Generator::Visit(AST::IntegerLiteral* node) 
 	{
 		if(node->IsFloating()) {
-			retValue = mlir::typher::ConstantOp::create(*builder,
-			 loc(node->Loc()), builder->getF32Type(), node->Value<double>());
+			builder_->retValue = mlir::typher::ConstantOp::create(*builder_->op,
+			 builder_->loc(node->Loc()), builder_->op->getF32Type(), node->Value<double>());
 		} else {
-			retValue = mlir::typher::ConstantOp::create(*builder,
-			 loc(node->Loc()), builder->getI32Type(), node->Value<int>());
+			builder_->retValue = mlir::typher::ConstantOp::create(*builder_->op,
+			 builder_->loc(node->Loc()), builder_->op->getI32Type(), node->Value<int>());
 		}
 	}
 
 	void Generator::Visit(AST::StringLiteral* node) 
 	{
 		if(node->IsChar()) {
-			retValue = mlir::typher::ConstantOp::create(*builder,
-			 	loc(node->Loc()), builder->getI8Type(), node->Value<char>());
+			builder_->retValue = mlir::typher::ConstantOp::create(*builder_->op,
+			 	builder_->loc(node->Loc()), builder_->op->getI8Type(), node->Value<char>());
 		} else {
 			
 		}
@@ -430,26 +328,26 @@ namespace MLIR {
 
 	void Generator::Visit(AST::ForStatement* node) 
 	{
-		auto location = loc(node->Loc()); 
+		auto location = builder_->loc(node->Loc()); 
 
 		if (node->InitializeStmt()) {
 			node->InitializeStmt()->Accept(this);
 		}
 
-		auto whileOp = mlir::typher::WhileOp::create(*builder, location);
+		auto whileOp = mlir::typher::WhileOp::create(*builder_->op, location);
 		
-		mlir::Block* condBlock = builder->createBlock(&whileOp.getCondRegion());
-		builder->setInsertionPointToStart(condBlock);
+		mlir::Block* condBlock = builder_->op->createBlock(&whileOp.getCondRegion());
+		builder_->op->setInsertionPointToStart(condBlock);
 		
 		if (node->ConditionExpr()) {
 			node->ConditionExpr()->Accept(this);
 		} else {
 			// If the condition is empty (e.g., for(;;)), it's an infinite loop. 
 			// Materialize a constant true boolean (i1).
-			retValue = builder->create<mlir::arith::ConstantIntOp>(location, 1, 1);
+			builder_->retValue = builder_->op->create<mlir::arith::ConstantIntOp>(location, 1, 1);
 		}
 		
-		mlir::Value condition = retValue;
+		mlir::Value condition = builder_->retValue;
 		if (!condition)
 			return;
 
@@ -458,79 +356,79 @@ namespace MLIR {
 			node->IteratorExpr()->Accept(this);
 		}
 
-		mlir::typher::YieldOp::create(*builder, location, condition);
+		mlir::typher::YieldOp::create(*builder_->op, location, condition);
 
-		mlir::Block* bodyBlock = builder->createBlock(&whileOp.getBodyRegion());
-		builder->setInsertionPointToStart(bodyBlock);
+		mlir::Block* bodyBlock = builder_->op->createBlock(&whileOp.getBodyRegion());
+		builder_->op->setInsertionPointToStart(bodyBlock);
 		
 		// Generate code for the actual loop statements
-		GenBody(node->GetBody(), location);
+		builder_->GenBody(node->GetBody(), location);
 
-		builder->setInsertionPointAfter(whileOp);
+		builder_->op->setInsertionPointAfter(whileOp);
 		return;
 	}
 
 	void Generator::Visit(AST::WhileStatement* node) 
 	{
-		auto location = loc(node->Loc()); 
+		auto location = builder_->loc(node->Loc()); 
 
-		auto whileOp = mlir::typher::WhileOp::create(*builder, location);
-		mlir::Block* condBlock = builder->createBlock(&whileOp.getCondRegion());
+		auto whileOp = mlir::typher::WhileOp::create(*builder_->op, location);
+		mlir::Block* condBlock = builder_->op->createBlock(&whileOp.getCondRegion());
 		
-		builder->setInsertionPointToStart(condBlock);
+		builder_->op->setInsertionPointToStart(condBlock);
 		
 		node->ConditionExpr()->Accept(this);
-		mlir::Value condition = retValue;
+		mlir::Value condition = builder_->retValue;
 		if (!condition)
 			return ;
 
-		//builder->create<mlir::typher::ConditionYieldOp>(location, condVal);
-		mlir::typher::YieldOp::create(*builder, location, condition);
+		//builder_->op->create<mlir::typher::ConditionYieldOp>(location, condVal);
+		mlir::typher::YieldOp::create(*builder_->op, location, condition);
 
-		mlir::Block* bodyBlock = builder->createBlock(&whileOp.getBodyRegion());
-		builder->setInsertionPointToStart(bodyBlock);
+		mlir::Block* bodyBlock = builder_->op->createBlock(&whileOp.getBodyRegion());
+		builder_->op->setInsertionPointToStart(bodyBlock);
 		
-		GenBody(node->GetBody(), location);
+		builder_->GenBody(node->GetBody(), location);
 
-		builder->setInsertionPointAfter(whileOp);
+		builder_->op->setInsertionPointAfter(whileOp);
 		return ; 
 	}
 
 	void Generator::Visit(AST::IfStatement* node) 
 	{
-		auto location = loc(node->Loc()); 
+		auto location = builder_->loc(node->Loc()); 
 		node->ConditionExpr()->Accept(this);
-		mlir::Value condition = retValue;
+		mlir::Value condition = builder_->retValue;
 		if (!condition)
 			return ;
 
-		auto ifOp = mlir::typher::IfOp::create(*builder, location, condition, 
+		auto ifOp = mlir::typher::IfOp::create(*builder_->op, location, condition, 
 			node->HasElse() || node->HasElif());
 
- 		builder->setInsertionPointToStart(&ifOp.getThenRegion().front());
-		GenBody(node->GetBody(), location);
+ 		builder_->op->setInsertionPointToStart(&ifOp.getThenRegion().front());
+		builder_->GenBody(node->GetBody(), location);
 		
 		if(node->HasElif() ) {
-			builder->setInsertionPointToStart(&ifOp.getElseRegion().front());
-			llvm::ScopedHashTableScope<llvm::StringRef, mlir::Value> varScope(symbolTable);
+			builder_->op->setInsertionPointToStart(&ifOp.getElseRegion().front());
+			llvm::ScopedHashTableScope<llvm::StringRef, mlir::Value> varScope(builder_->symbolTable);
 			node->Elif()->Accept(this);
-			builder->setInsertionPointToEnd(&ifOp.getElseRegion().front());
-			mlir::typher::YieldOp::create(*builder, location);
+			builder_->op->setInsertionPointToEnd(&ifOp.getElseRegion().front());
+			mlir::typher::YieldOp::create(*builder_->op, location);
 		} else if (node->HasElse()) {
-			builder->setInsertionPointToStart(&ifOp.getElseRegion().front());
-			GenBody(node->ElseBody(), location);
+			builder_->op->setInsertionPointToStart(&ifOp.getElseRegion().front());
+			builder_->GenBody(node->ElseBody(), location);
 		}
 
-		builder->setInsertionPointAfter(ifOp);
+		builder_->op->setInsertionPointAfter(ifOp);
 		return ; 
 	}
 
 	void Generator::Visit(AST::Operator* node) 
 	{
-		auto location = loc(node->Loc());
+		auto location = builder_->loc(node->Loc());
 
 		node->GetRHS()->Accept(this);
-		mlir::Value rhs = LvalueToRvalue(retValue, location);
+		mlir::Value rhs = builder_->LvalueToRvalue(builder_->retValue, location);
 
 		if (!rhs)
 			return;
@@ -538,37 +436,37 @@ namespace MLIR {
 		if(node->OperatorType() ==  AST::OperatorKind::ASN)
 		{
 			node->GetLHS()->Accept(this);
-			mlir::Value lvalue = retValue;
+			mlir::Value lvalue = builder_->retValue;
 
-			mlir::typher::AssignOp::create(*builder, location, rhs, lvalue);
+			mlir::typher::AssignOp::create(*builder_->op, location, rhs, lvalue);
 
 			return;
 		}
 
 		node->GetLHS()->Accept(this);
-		mlir::Value lhs = LvalueToRvalue(retValue, location);;
+		mlir::Value lhs = builder_->LvalueToRvalue(builder_->retValue, location);;
 		if (!lhs)
 			return;
 
 		switch(node->OperatorType()) {
 			case AST::OperatorKind::ADD: {
-				retValue = mlir::arith::AddIOp::create(*builder, location, lhs, rhs);
+				builder_->retValue = mlir::arith::AddIOp::create(*builder_->op, location, lhs, rhs);
 				return;
 			}
 			case AST::OperatorKind::SUB: {
-				retValue = mlir::arith::SubIOp::create(*builder, location, lhs, rhs);
+				builder_->retValue = mlir::arith::SubIOp::create(*builder_->op, location, lhs, rhs);
 				return;
 			}
 			case AST::OperatorKind::MUL: {
-				retValue = mlir::arith::MulIOp::create(*builder, location, lhs, rhs);
+				builder_->retValue = mlir::arith::MulIOp::create(*builder_->op, location, lhs, rhs);
 				return;
 			}
 			case AST::OperatorKind::DIV: {
-				retValue = mlir::arith::DivSIOp::create(*builder, location, lhs, rhs);
+				builder_->retValue = mlir::arith::DivSIOp::create(*builder_->op, location, lhs, rhs);
 				return;
 			}
 			case AST::OperatorKind::MOD: {
-				retValue = mlir::arith::RemSIOp::create(*builder, location, lhs, rhs);
+				builder_->retValue = mlir::arith::RemSIOp::create(*builder_->op, location, lhs, rhs);
 				return;
 			}
 			default:{
@@ -584,7 +482,7 @@ namespace MLIR {
 						case AST::OperatorKind::GRT: predicate = mlir::arith::CmpFPredicate::OGT; break;
 						default: /* handle error */ break;
 					}
-					retValue = mlir::arith::CmpFOp::create(*builder, location, predicate, lhs, rhs);
+					builder_->retValue = mlir::arith::CmpFOp::create(*builder_->op, location, predicate, lhs, rhs);
 				} else {
 					mlir::arith::CmpIPredicate predicate;
 					switch (node->OperatorType()) {
@@ -596,7 +494,7 @@ namespace MLIR {
 						case AST::OperatorKind::GRT: predicate = mlir::arith::CmpIPredicate::sgt; break;
 						default: /* handle error */ break;
 					}
-					retValue = mlir::arith::CmpIOp::create(*builder, location, predicate, lhs, rhs);
+					builder_->retValue = mlir::arith::CmpIOp::create(*builder_->op, location, predicate, lhs, rhs);
 				}
 				break;
 			}

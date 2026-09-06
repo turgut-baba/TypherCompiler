@@ -3,7 +3,7 @@
 
 #include "TypherCompiler.h"
 #include "Parser.h"
-#include "MLIRBuilder.h"
+#include "MLIRGen.h"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -79,7 +79,7 @@ int main(int argc, char** argv)
         //checker::Checker checker = checker::Checker(diags, &allocator);
         //checker.StartChecker(ast);
         
-        MLIR::Builder mlir = MLIR::Builder();
+        MLIR::Generator mlir = MLIR::Generator(&allocator);
         mlir.BuildModule(ast);
 
         diags.report<DiagLevel::Success>()

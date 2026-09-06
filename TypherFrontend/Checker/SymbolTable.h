@@ -1,9 +1,11 @@
+#ifndef SYMBOL_TABLE_H
+#define SYMBOL_TABLE_H
+
 #include <iostream>
 #include <vector>
 #include <unordered_map>
 #include <string>
 
-#include "DiagnosticEngine.h"
 #include "Memory/MemAlloc.h"
 
 #include "Type.h"
@@ -41,13 +43,20 @@ public:
 
     void ExitScope()
     {
-        TYPHER_ASSERT(scopes.size() > 1 && "Cannot exit top-level global scope!");
+        //ASSERT(scopes.size() > 1 && "Cannot exit top-level global scope!");
         scopes.pop_back();
     }
 
     bool IsGlobalScope() const 
     {
         return scopes.size() == 1;
+    }
+
+    bool Declare(const std::string& name, Symbol symbol) 
+    {
+        auto& currentScope = scopes.back();
+        auto [it, inserted] = currentScope.emplace(name, std::move(symbol));
+        return inserted; // returns false if name is already declared in current scope
     }
 
     Symbol* Lookup(const std::string& name)
@@ -79,7 +88,9 @@ public:
         return nullptr;
     }   
 private:
-    std::vector<std::unordered_map<std::string, Symbol>> stack;
+    std::vector<std::unordered_map<std::string, Symbol>> scopes;
 };
 
 }
+
+#endif
